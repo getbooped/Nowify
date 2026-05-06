@@ -147,7 +147,7 @@ export default {
           const whiteText = "#ffffff";
 
           if (swatch) {
-            const [h, s, l] = swatch.getHsl();
+            const [, s, l] = swatch.getHsl();
 
             // 2. Accuracy Check: If low saturation (gray/black/white) 
             // or extreme lightness (near-black or near-white)
