@@ -132,23 +132,49 @@ export default {
      * Get the colour palette from the album cover.
      */
     getAlbumColours() {
-      /**
-       * No image (rare).
-       */
       if (!this.player.trackAlbum?.image) {
         return
       }
-
-      /**
-       * Run node-vibrant to get colours.
-       */
+      
       Vibrant.from(this.player.trackAlbum.image)
         .quality(1)
         .clearFilters()
         .getPalette()
         .then(palette => {
+          // 1. Target the 'Vibrant' swatch specifically for the best "Spotify" look
+          const swatch = palette.Vibrant;
+          const darkGray = "#1a1a1a";
+          const whiteText = "#ffffff";
+
+          if (swatch) {
+            const [h, s, l] = swatch.getHsl();
+
+            // 2. Accuracy Check: If low saturation (gray/black/white) 
+            // or extreme lightness (near-black or near-white)
+            if (s < 0.1 || l < 0.15 || l > 0.85) {
+              // Override palette with a consistent Dark Gray theme
+              palette.Vibrant = {
+                getHex: () => darkGray,
+                getTitleTextColor: () => whiteText,
+                hex: darkGray
+              };
+            }
+          } else {
+            // Fallback if Vibrant swatch doesn't exist
+            palette.Vibrant = {
+              getHex: () => darkGray,
+              getTitleTextColor: () => whiteText,
+              hex: darkGray
+            };
+          }
+
           this.handleAlbumPalette(palette)
         })
+        .catch(() => {
+          // Ensure no errors if image loading fails
+          this.colourPalette = { background: "#1a1a1a", text: "#ffffff" };
+          this.setAppColours();
+        });
     },
 
     /**
@@ -242,26 +268,29 @@ export default {
      * - Map data to readable format
      * - Get and store random colour combination.
      */
-    handleAlbumPalette(palette) {
+handleAlbumPalette(palette) {
+      // Filter out null swatches and map to background/text objects
       let albumColours = Object.keys(palette)
-        .filter(item => {
-          return item === null ? null : item
-        })
-        .map(colour => {
+        .filter(key => palette[key] !== null)
+        .map(key => {
           return {
-            text: palette[colour].getTitleTextColor(),
-            background: palette[colour].getHex()
+            name: key, // Keep track of which swatch this is
+            text: palette[key].getTitleTextColor(),
+            background: palette[key].getHex()
           }
-        })
+        });
 
-      this.swatches = albumColours
+      this.swatches = albumColours;
 
-      this.colourPalette =
-        albumColours[Math.floor(Math.random() * albumColours.length)]
+      // FIX: Instead of picking a random color, find the 'Vibrant' one we filtered above.
+      // If it's not found, just take the first available swatch.
+      const dominant = albumColours.find(c => c.name === 'Vibrant') || albumColours[0];
+
+      this.colourPalette = dominant;
 
       this.$nextTick(() => {
-        this.setAppColours()
-      })
+        this.setAppColours();
+      });
     },
 
     /**
