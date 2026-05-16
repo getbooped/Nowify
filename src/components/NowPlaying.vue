@@ -24,8 +24,6 @@
 </template>
 
 <script>
-import * as Vibrant from 'node-vibrant'
-
 import props from '@/utils/props.js'
 
 export default {
@@ -129,108 +127,167 @@ export default {
     },
 
     /**
-     * Get the colour palette from the album cover, matching the custom Python vivid pipeline.
+     * Get the colour palette from the album cover by replicating the exact Python K-Means workflow.
      */
     getAlbumColours() {
       if (!this.player.trackAlbum?.image) {
         return
       }
 
-      // === Pipeline Helper 1: Python is_monochrome() Match ===
-      const isMonochrome = (r, g, b) => {
-        const max_c = Math.max(r, g, b);
-        const min_c = Math.min(r, g, b);
-        const diff = max_c - min_c;
+      const imageUrl = this.player.trackAlbum.image;
+      const img = new Image();
+      img.crossOrigin = "anonymous"; // Enables secure pixel extractions on Spotify's open CDN
+      img.src = imageUrl;
 
-        if (diff < 30) return true;
-        if (max_c < 30 || min_c > 220) return true;
+      img.onload = () => {
+        // Step 1: Downsample image to 100x100 matrix matching Python's image.resize((100, 100))
+        const canvas = document.createElement('canvas');
+        canvas.width = 100;
+        canvas.height = 100;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, 100, 100);
 
-        return false;
-      };
-
-      // === Pipeline Helper 2: Python make_vivid() Match (HSV Conversion) ===
-      const makeVividHex = (r, g, b) => {
-        r /= 255; g /= 255; b /= 255;
-        const max = Math.max(r, g, b), min = Math.min(r, g, b);
-        let h, s, v = max;
-        const d = max - min;
-        s = max === 0 ? 0 : d / max;
-
-        if (max === min) {
-          h = 0;
-        } else {
-          switch (max) {
-            case r: h = (g - b) / d + (g < b ? 6 : 0); break;
-            case g: h = (b - r) / d + 2; break;
-            case b: h = (r - g) / d + 4; break;
-          }
-          h /= 6;
+        // Step 2: Extract raw RGB pixel linear matrix
+        const imgData = ctx.getImageData(0, 0, 100, 100).data;
+        const pixels = [];
+        for (let i = 0; i < imgData.length; i += 4) {
+          pixels.push([imgData[i], imgData[i+1], imgData[i+2]]);
         }
 
-        // Force saturation and value to max thresholds
-        s = Math.max(s, 0.95);
-        v = Math.max(v, 0.95);
-
-        // Map back to standard RGB matrix
-        let r2, g2, b2;
-        const i = Math.floor(h * 6);
-        const f = h * 6 - i;
-        const p = v * (1 - s);
-        const q = v * (1 - f * s);
-        const t = v * (1 - (1 - f) * s);
-        switch (i % 6) {
-          case 0: r2 = v; g2 = t; b2 = p; break;
-          case 1: r2 = q; g2 = v; b2 = p; break;
-          case 2: r2 = p; g2 = v; b2 = t; break;
-          case 3: r2 = p; g2 = q; b2 = v; break;
-          case 4: r2 = t; g2 = p; b2 = v; break;
-          case 5: r2 = v; g2 = p; b2 = q; break;
+        // Step 3: Pure Deterministic K-Means Clustering (k=8)
+        const k = 8;
+        let centroids = [];
+        const step = Math.floor(pixels.length / k);
+        for (let i = 0; i < k; i++) {
+          centroids.push([...pixels[i * step]]);
         }
 
-        const rgb = [Math.round(r2 * 255), Math.round(g2 * 255), Math.round(b2 * 255)];
-        return "#" + rgb.map(x => x.toString(16).padStart(2, '0')).join('');
-      };
-      
-      Vibrant.from(this.player.trackAlbum.image)
-        .quality(1)
-        .clearFilters()
-        .getPalette()
-        .then(palette => {
-          const fallbackGray = "#282828"; // Exact match to Python's (40, 40, 40)
-          const whiteText = "#ffffff";
-          let finalHex = null;
+        let counts = new Array(k).fill(0);
+        let labels = new Array(pixels.length);
 
-          // Sequential array loop to look for cleaner accent alternative swatches
-          const swatchKeys = ['Vibrant', 'LightVibrant', 'DarkVibrant', 'Muted', 'LightMuted', 'DarkMuted'];
-
-          for (const key of swatchKeys) {
-            const swatch = palette[key];
-            if (swatch) {
-              const [r, g, b] = swatch.getRgb();
-              if (!isMonochrome(r, g, b)) {
-                finalHex = makeVividHex(r, g, b);
-                break;
+        // Run iterations to isolate the central clusters
+        for (let iter = 0; iter < 10; iter++) {
+          counts.fill(0);
+          for (let i = 0; i < pixels.length; i++) {
+            const p = pixels[i];
+            let minDist = Infinity;
+            let closestIdx = 0;
+            for (let j = 0; j < k; j++) {
+              const c = centroids[j];
+              const dist = Math.pow(p[0] - c[0], 2) + Math.pow(p[1] - c[1], 2) + Math.pow(p[2] - c[2], 2);
+              if (dist < minDist) {
+                minDist = dist;
+                closestIdx = j;
               }
             }
+            labels[i] = closestIdx;
+            counts[closestIdx]++;
           }
 
-          if (!finalHex) {
-            finalHex = fallbackGray;
+          let newCentroids = Array.from({ length: k }, () => [0, 0, 0]);
+          for (let i = 0; i < pixels.length; i++) {
+            const label = labels[i];
+            newCentroids[label][0] += pixels[i][0];
+            newCentroids[label][1] += pixels[i][1];
+            newCentroids[label][2] += pixels[i][2];
           }
 
-          // Format output to safely interface with handleAlbumPalette()
-          palette.Vibrant = {
+          for (let j = 0; j < k; j++) {
+            if (counts[j] > 0) {
+              newCentroids[j][0] = Math.round(newCentroids[j][0] / counts[j]);
+              newCentroids[j][1] = Math.round(newCentroids[j][1] / counts[j]);
+              newCentroids[j][2] = Math.round(newCentroids[j][2] / counts[j]);
+            }
+          }
+          centroids = newCentroids;
+        }
+
+        // Step 4: Map cluster metrics and sort descending by size/population density
+        const palette = centroids.map((c, idx) => ({ rgb: c, count: counts[idx] }));
+        palette.sort((a, b) => b.count - a.count);
+
+        // Step 5: Exact Python is_monochrome filter match
+        const isMonochrome = (r, g, b) => {
+          const max_c = Math.max(r, g, b);
+          const min_c = Math.min(r, g, b);
+          const diff = max_c - min_c;
+
+          if (diff < 30) return true;
+          if (max_c < 30 || min_c > 220) return true;
+
+          return false;
+        };
+
+        // Step 6: Exact Python make_vivid pipeline match
+        const makeVividHex = (r, g, b) => {
+          r /= 255; g /= 255; b /= 255;
+          const max = Math.max(r, g, b), min = Math.min(r, g, b);
+          let h, s, v = max;
+          const d = max - min;
+          s = max === 0 ? 0 : d / max;
+
+          if (max === min) {
+            h = 0;
+          } else {
+            switch (max) {
+              case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+              case g: h = (b - r) / d + 2; break;
+              case b: h = (r - g) / d + 4; break;
+            }
+            h /= 6;
+          }
+
+          s = Math.max(s, 0.95);
+          v = Math.max(v, 0.95);
+
+          let r2, g2, b2;
+          const i = Math.floor(h * 6);
+          const f = h * 6 - i;
+          const p = v * (1 - s);
+          const q = v * (1 - f * s);
+          const t = v * (1 - (1 - f) * s);
+          switch (i % 6) {
+            case 0: r2 = v; g2 = t; b2 = p; break;
+            case 1: r2 = q; g2 = v; b2 = p; break;
+            case 2: r2 = p; g2 = v; b2 = t; break;
+            case 3: r2 = p; g2 = q; b2 = v; break;
+            case 4: r2 = t; g2 = p; b2 = v; break;
+            case 5: r2 = v; g2 = p; b2 = q; break;
+          }
+
+          const rgb = [Math.round(r2 * 255), Math.round(g2 * 255), Math.round(b2 * 255)];
+          return "#" + rgb.map(x => x.toString(16).padStart(2, '0')).join('');
+        };
+
+        let finalHex = null;
+        for (const item of palette) {
+          const [r, g, b] = item.rgb;
+          if (!isMonochrome(r, g, b)) {
+            finalHex = makeVividHex(r, g, b);
+            break;
+          }
+        }
+
+        if (!finalHex) {
+          finalHex = "#282828"; // Exact (40, 40, 40) Python fallback color
+        }
+
+        // Mock object payload to pass color formatting to the application state smoothly
+        const mockPalette = {
+          Vibrant: {
             getHex: () => finalHex,
-            getTitleTextColor: () => whiteText,
+            getTitleTextColor: () => "#ffffff",
             hex: finalHex
-          };
+          }
+        };
 
-          this.handleAlbumPalette(palette);
-        })
-        .catch(() => {
-          this.colourPalette = { name: 'Vibrant', background: "#282828", text: "#ffffff" };
-          this.setAppColours();
-        });
+        this.handleAlbumPalette(mockPalette);
+      };
+
+      img.onerror = () => {
+        this.colourPalette = { name: 'Vibrant', background: "#282828", text: "#ffffff" };
+        this.setAppColours();
+      };
     },
 
     /**
@@ -337,7 +394,6 @@ export default {
 
       this.swatches = albumColours;
 
-      // Extract the intercepted pipeline value we attached to the Vibrant property above
       const dominant = albumColours.find(c => c.name === 'Vibrant') || albumColours[0];
 
       this.colourPalette = dominant;
