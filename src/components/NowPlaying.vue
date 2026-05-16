@@ -129,50 +129,106 @@ export default {
     },
 
     /**
-     * Get the colour palette from the album cover.
+     * Get the colour palette from the album cover, matching the custom Python vivid pipeline.
      */
     getAlbumColours() {
       if (!this.player.trackAlbum?.image) {
         return
       }
+
+      // === Pipeline Helper 1: Python is_monochrome() Match ===
+      const isMonochrome = (r, g, b) => {
+        const max_c = Math.max(r, g, b);
+        const min_c = Math.min(r, g, b);
+        const diff = max_c - min_c;
+
+        if (diff < 30) return true;
+        if (max_c < 30 || min_c > 220) return true;
+
+        return false;
+      };
+
+      // === Pipeline Helper 2: Python make_vivid() Match (HSV Conversion) ===
+      const makeVividHex = (r, g, b) => {
+        r /= 255; g /= 255; b /= 255;
+        const max = Math.max(r, g, b), min = Math.min(r, g, b);
+        let h, s, v = max;
+        const d = max - min;
+        s = max === 0 ? 0 : d / max;
+
+        if (max === min) {
+          h = 0;
+        } else {
+          switch (max) {
+            case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+            case g: h = (b - r) / d + 2; break;
+            case b: h = (r - g) / d + 4; break;
+          }
+          h /= 6;
+        }
+
+        // Force saturation and value to max thresholds
+        s = Math.max(s, 0.95);
+        v = Math.max(v, 0.95);
+
+        // Map back to standard RGB matrix
+        let r2, g2, b2;
+        const i = Math.floor(h * 6);
+        const f = h * 6 - i;
+        const p = v * (1 - s);
+        const q = v * (1 - f * s);
+        const t = v * (1 - (1 - f) * s);
+        switch (i % 6) {
+          case 0: r2 = v; g2 = t; b2 = p; break;
+          case 1: r2 = q; g2 = v; b2 = p; break;
+          case 2: r2 = p; g2 = v; b2 = t; break;
+          case 3: r2 = p; g2 = q; b2 = v; break;
+          case 4: r2 = t; g2 = p; b2 = v; break;
+          case 5: r2 = v; g2 = p; b2 = q; break;
+        }
+
+        const rgb = [Math.round(r2 * 255), Math.round(g2 * 255), Math.round(b2 * 255)];
+        return "#" + rgb.map(x => x.toString(16).padStart(2, '0')).join('');
+      };
       
       Vibrant.from(this.player.trackAlbum.image)
         .quality(1)
         .clearFilters()
         .getPalette()
         .then(palette => {
-          // 1. Target the 'Vibrant' swatch specifically for the best "Spotify" look
-          const swatch = palette.Vibrant;
-          const darkGray = "#1a1a1a";
+          const fallbackGray = "#282828"; // Exact match to Python's (40, 40, 40)
           const whiteText = "#ffffff";
+          let finalHex = null;
 
-          if (swatch) {
-            const [h, s, l] = swatch.getHsl();
+          // Sequential array loop to look for cleaner accent alternative swatches
+          const swatchKeys = ['Vibrant', 'LightVibrant', 'DarkVibrant', 'Muted', 'LightMuted', 'DarkMuted'];
 
-            // 2. Accuracy Check: If low saturation (gray/black/white) 
-            // or extreme lightness (near-black or near-white)
-            if (s < 0.1 || l < 0.15 || l > 0.85) {
-              // Override palette with a consistent Dark Gray theme
-              palette.Vibrant = {
-                getHex: () => darkGray,
-                getTitleTextColor: () => whiteText,
-                hex: darkGray
-              };
+          for (const key of swatchKeys) {
+            const swatch = palette[key];
+            if (swatch) {
+              const [r, g, b] = swatch.getRgb();
+              if (!isMonochrome(r, g, b)) {
+                finalHex = makeVividHex(r, g, b);
+                break;
+              }
             }
-          } else {
-            // Fallback if Vibrant swatch doesn't exist
-            palette.Vibrant = {
-              getHex: () => darkGray,
-              getTitleTextColor: () => whiteText,
-              hex: darkGray
-            };
           }
 
-          this.handleAlbumPalette(palette)
+          if (!finalHex) {
+            finalHex = fallbackGray;
+          }
+
+          // Format output to safely interface with handleAlbumPalette()
+          palette.Vibrant = {
+            getHex: () => finalHex,
+            getTitleTextColor: () => whiteText,
+            hex: finalHex
+          };
+
+          this.handleAlbumPalette(palette);
         })
         .catch(() => {
-          // Ensure no errors if image loading fails
-          this.colourPalette = { background: "#1a1a1a", text: "#ffffff" };
+          this.colourPalette = { name: 'Vibrant', background: "#282828", text: "#ffffff" };
           this.setAppColours();
         });
     },
@@ -268,13 +324,12 @@ export default {
      * - Map data to readable format
      * - Get and store random colour combination.
      */
-handleAlbumPalette(palette) {
-      // Filter out null swatches and map to background/text objects
+    handleAlbumPalette(palette) {
       let albumColours = Object.keys(palette)
         .filter(key => palette[key] !== null)
         .map(key => {
           return {
-            name: key, // Keep track of which swatch this is
+            name: key, 
             text: palette[key].getTitleTextColor(),
             background: palette[key].getHex()
           }
@@ -282,8 +337,7 @@ handleAlbumPalette(palette) {
 
       this.swatches = albumColours;
 
-      // FIX: Instead of picking a random color, find the 'Vibrant' one we filtered above.
-      // If it's not found, just take the first available swatch.
+      // Extract the intercepted pipeline value we attached to the Vibrant property above
       const dominant = albumColours.find(c => c.name === 'Vibrant') || albumColours[0];
 
       this.colourPalette = dominant;
